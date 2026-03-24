@@ -11,6 +11,8 @@
 #   DAILY_LOG_LLM_KEY   API key (optional)
 #   DAILY_LOG_LLM_MODEL Model name (optional, default: gpt-4o-mini)
 
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 [ -f "$HOME/.claude/.env" ] && . "$HOME/.claude/.env"
 
 DRAFT="$HOME/.claude/daily-draft.md"
@@ -19,13 +21,22 @@ MODE="${DAILY_LOG_MODE:-local}"
 # Cross-platform yesterday
 if date -d yesterday '+%Y-%m-%d' >/dev/null 2>&1; then
     DATE=$(date -d yesterday '+%Y-%m-%d')
-else
+elif date -v-1d '+%Y-%m-%d' >/dev/null 2>&1; then
     DATE=$(date -v-1d '+%Y-%m-%d')
+else
+    echo "ERROR: cannot determine yesterday's date" >&2
+    exit 1
 fi
+
+# Validate DATE format
+case "$DATE" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+    *) echo "ERROR: unexpected date format: $DATE" >&2; exit 1 ;;
+esac
 
 # Determine log file path
 if [ "$MODE" = "git" ]; then
-    [ -z "$DAILY_LOG_GIT_REPO" ] && echo "DAILY_LOG_GIT_REPO not set" && exit 1
+    [ -z "$DAILY_LOG_GIT_REPO" ] && echo "DAILY_LOG_GIT_REPO not set" >&2 && exit 1
     LOG_FILE="$DAILY_LOG_GIT_REPO/logs/${DATE}.md"
 else
     LOG_DIR="${DAILY_LOG_DIR:-$HOME/.claude/logs}"
@@ -62,13 +73,23 @@ Merge them into one complete log, preserving existing details and integrating ne
         --arg user "$USER_CONTENT" \
         '{model: $model, messages: [{role: "system", content: $system}, {role: "user", content: $user}]}')
 
-    RESPONSE=$(curl -s "$DAILY_LOG_LLM_URL/chat/completions" \
+    RESPONSE=$(curl -s --max-time 60 "$DAILY_LOG_LLM_URL/chat/completions" \
         -H "Authorization: Bearer ${DAILY_LOG_LLM_KEY:-}" \
         -H "Content-Type: application/json" \
         -d "$PAYLOAD")
 
+    # Check for API-level error
+    API_ERR=$(printf '%s' "$RESPONSE" | jq -r '.error.message // ""' 2>/dev/null)
+    if [ -n "$API_ERR" ]; then
+        echo "LLM API error: $API_ERR" >&2
+        exit 1
+    fi
+
     LOG_CONTENT=$(printf '%s' "$RESPONSE" | jq -r '.choices[0].message.content // ""')
-    [ -z "$LOG_CONTENT" ] && echo "LLM returned empty response" && exit 1
+    if [ -z "$LOG_CONTENT" ]; then
+        echo "LLM returned empty response" >&2
+        exit 1
+    fi
 else
     if [ -n "$EXISTING" ]; then
         LOG_CONTENT="${EXISTING}
@@ -86,14 +107,14 @@ else
     mkdir -p "$LOG_DIR"
 fi
 
-printf '# %s\n\n%s\n' "$DATE" "$LOG_CONTENT" > "$LOG_FILE"
+printf '# %s\n\n%s\n' "$DATE" "$LOG_CONTENT" > "$LOG_FILE" || exit 1
 
 # Git mode: commit and push
 if [ "$MODE" = "git" ]; then
     cd "$DAILY_LOG_GIT_REPO" && \
         git add "logs/${DATE}.md" && \
         git commit -m "Add ${DATE} work log" && \
-        git push
+        git push || exit 1
 fi
 
 rm -f "$DRAFT"

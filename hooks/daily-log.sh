@@ -4,17 +4,19 @@
 # Accumulates session summaries in ~/.claude/daily-draft.md throughout the day.
 # Run daily-log-publish.sh via cron to consolidate and store the log.
 
-INPUT=$(cat)
-DRAFT="$HOME/.claude/daily-draft.md"
-NOW=$(date '+%H:%M')
+command -v jq > /dev/null 2>&1 || exit 0
 
-SUMMARY=$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // ""' | cut -c1-300)
-[ -z "$SUMMARY" ] && exit 0
+_input=$(cat)
 
-cat >> "$DRAFT" << EOF
+_active=$(printf '%s' "$_input" | jq -r '.stop_hook_active // false')
+[ "$_active" = "true" ] && exit 0
 
-## Session @ ${NOW}
-${SUMMARY}
-EOF
+_draft="$HOME/.claude/daily-draft.md"
+_now=$(date '+%H:%M')
+
+_summary=$(printf '%s' "$_input" | jq -r '.last_assistant_message // ""' | cut -c1-300)
+[ -z "$_summary" ] && exit 0
+
+printf '\n## Session @ %s\n%s\n' "$_now" "$_summary" >> "$_draft"
 
 exit 0
