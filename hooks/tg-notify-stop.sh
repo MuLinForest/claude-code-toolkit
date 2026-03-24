@@ -5,13 +5,20 @@
 
 . "$HOME/.claude/hooks/telegram.sh"
 
-INPUT=$(cat)
+command -v jq > /dev/null 2>&1 || exit 0
 
-SUMMARY=$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // ""' | cut -c1-300)
-[ -z "$SUMMARY" ] && exit 0
+_input=$(cat)
+
+_active=$(printf '%s' "$_input" | jq -r '.stop_hook_active // false')
+[ "$_active" = "true" ] && exit 0
+
+_summary=$(printf '%s' "$_input" | jq -r '.last_assistant_message // ""' | cut -c1-300)
+[ -z "$_summary" ] && exit 0
+
+_summary_escaped=$(_escape_html "$_summary")
 
 send_tg "✅ <b>Claude finished</b>
 
-${SUMMARY}"
+${_summary_escaped}"
 
 exit 0

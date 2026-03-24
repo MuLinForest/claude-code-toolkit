@@ -5,23 +5,28 @@
 
 . "$HOME/.claude/hooks/telegram.sh"
 
-INPUT=$(cat)
+command -v jq > /dev/null 2>&1 || exit 0
 
-TOOL=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""')
-[ "$TOOL" != "Bash" ] && exit 0
+_input=$(cat)
 
-CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // ""' | cut -c1-200)
+_tool=$(printf '%s' "$_input" | jq -r '.tool_name // ""')
+[ "$_tool" != "Bash" ] && exit 0
 
-HIGH_RISK='ssh |docker |rm |reboot|shutdown|mkfs|dd if=|DROP TABLE|DROP DATABASE'
+_cmd=$(printf '%s' "$_input" | jq -r '.tool_input.command // ""' | cut -c1-200)
+[ -z "$_cmd" ] && exit 0
 
-if printf '%s' "$CMD" | grep -qE "$HIGH_RISK"; then
+_cmd_escaped=$(_escape_html "$_cmd")
+
+_HIGH_RISK='(^|[[:space:]])(rm|ssh|docker|mkfs|dd)[[:space:]]|reboot|shutdown|DROP TABLE|DROP DATABASE'
+
+if printf '%s' "$_cmd" | grep -qE "$_HIGH_RISK"; then
     send_tg "⚠️ <b>High-risk command</b> — check your terminal
 
-<code>${CMD}</code>"
+<code>${_cmd_escaped}</code>"
 else
     send_tg "⚙️ <b>Claude is running a command</b>
 
-<code>${CMD}</code>"
+<code>${_cmd_escaped}</code>"
 fi
 
 exit 0
