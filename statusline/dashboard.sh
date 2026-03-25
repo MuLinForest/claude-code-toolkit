@@ -66,7 +66,11 @@ render() {
     ts=$(date '+%Y-%m-%d %H:%M:%S')
     now=$(date +%s)
 
-    printf '%b' "${C_TITLE}Claude Code Dashboard${R}  ${ts}  ${DIM}(every ${INTERVAL}s)${R}"
+    if [ "${_REFRESH_MODE:-polling}" = "inotify" ]; then
+        printf '%b' "${C_TITLE}Claude Code Dashboard${R}  ${ts}  ${DIM}(event-driven)${R}"
+    else
+        printf '%b' "${C_TITLE}Claude Code Dashboard${R}  ${ts}  ${DIM}(every ${INTERVAL}s)${R}"
+    fi
     printf '\n\n'
 
     # Column headers
@@ -183,6 +187,17 @@ render() {
 mkdir -p "$SESSIONS_DIR"
 trap 'printf "\n"; exit 0' INT TERM
 
+if command -v inotifywait > /dev/null 2>&1; then
+    _REFRESH_MODE="inotify"
+    render
+    while inotifywait -q -e modify,create,delete "$SESSIONS_DIR" 2>/dev/null; do
+        render
+    done
+    # inotifywait exited unexpectedly — fall back to polling
+    _REFRESH_MODE="polling"
+fi
+
+# Polling loop (primary on macOS, fallback if inotifywait fails)
 while true; do
     render
     sleep "$INTERVAL"
