@@ -111,7 +111,7 @@ render() {
 
         # Determine display status: prefer event-driven .status file
         disp_status="" _status_epoch=""
-        read -r disp_status _status_epoch < "$SESSIONS_DIR/${pid}.status" 2>/dev/null || disp_status=""
+        [ -f "$SESSIONS_DIR/${pid}.status" ] && read -r disp_status _status_epoch < "$SESSIONS_DIR/${pid}.status"
         # Fallback: JSON field, then file age
         if [ -z "$disp_status" ]; then
             age=$(( now - epoch ))
