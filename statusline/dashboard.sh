@@ -86,13 +86,21 @@ render() {
     fi
     printf '\n\n'
 
+    # Adaptive MODEL column width — one jq across all session files
+    _model_w=10
+    if ls "$SESSIONS_DIR"/*.json > /dev/null 2>&1; then
+        _model_w=$(jq -rs '[.[] | .model // "" | gsub("^Claude "; "") | length] | max // 10' "$SESSIONS_DIR"/*.json 2>/dev/null)
+        [ "$_model_w" -lt 10 ] && _model_w=10
+    fi
+    _model_dashes=$(printf '%*s' "$_model_w" '' | tr ' ' '-')
+
     # Column headers
-    printf '%b%-8s %-22s %-14s %-12s %-8s %-24s %-6s %-7s %s%b\n' \
+    printf '%b%-8s %-22s %-14s %-*s %-8s %-24s %-6s %-7s %s%b\n' \
         "$C_HEAD" \
-        'PID' 'NAME' 'PROJECT' 'MODEL' 'STATUS' 'CONTEXT' 'CTX%' 'OUTPUT' 'BRANCH' \
+        'PID' 'NAME' 'PROJECT' "$_model_w" 'MODEL' 'STATUS' 'CONTEXT' 'CTX%' 'OUTPUT' 'BRANCH' \
         "$R"
     printf '%b%s%b\n' "$C_SEP" \
-        "-------- ---------------------- -------------- ------------ -------- ------------------------ ------ ------- ----------" \
+        "-------- ---------------------- -------------- ${_model_dashes} -------- ------------------------ ------ ------- ----------" \
         "$R"
 
     count=0; total_in=0; total_out=0; total_mem=0
@@ -184,7 +192,7 @@ EOF
         printf '%b%-8s%b ' "$C_PID"    "$pid"    "$R"
         printf '%b' "$C_NAME"; pad_wide "$slug" 22; printf '%b ' "$R"
         printf '%b%-14s%b ' "$C_PROJ"  "$project" "$R"
-        printf '%b%-12s%b ' "$C_MODEL" "$model"   "$R"
+        printf '%b%-*s%b ' "$C_MODEL" "$_model_w" "$model" "$R"
         printf '%b%-8s%b '  "$sc"      "$sl"      "$R"
         printf '%s '        "$bar"
         printf '%b%-6s%b '  "$C_PCT"   "${used_pct}%" "$R"
