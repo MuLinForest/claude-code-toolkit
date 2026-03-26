@@ -75,7 +75,7 @@ make_bar() {
 
 # ── Main render ───────────────────────────────────────────────────────────────
 render() {
-    printf '\033[2J\033[H'
+    _frame=$(
     ts=$(date '+%Y-%m-%d %H:%M:%S')
     now=$(date +%s)
 
@@ -96,30 +96,34 @@ render() {
         "$R"
 
     count=0; total_in=0; total_out=0; total_mem=0
+    _US=$(printf '\037')   # ASCII Unit Separator — POSIX-safe, non-whitespace
 
     for f in "$SESSIONS_DIR"/*.json; do
         [ -f "$f" ] || continue
 
-        pid=$(jq -r '.pid // 0' "$f" 2>/dev/null); [ "$pid" -gt 0 ] 2>/dev/null || continue
+        # Read all fields in one jq call using \u001f (unit separator) to avoid
+        # IFS whitespace collapsing of consecutive empty fields (e.g. git_branch + last_activity).
+        # Use octal \037 (not $'\x1f') for POSIX sh / dash compatibility.
+        _row=$(jq -r '[
+            .pid//0, .epoch//0,
+            .project_name//"unknown", .project_dir//"",
+            .model//"Unknown", .status//"",
+            (.used_pct//0|tostring), (.tokens_in//0|tostring), (.tokens_out//0|tostring),
+            .git_branch//"", .last_activity//"",
+            (.mem_kb//0|tostring),
+            .session_title//""
+        ] | join("\u001f")' "$f" 2>/dev/null) || continue
+        IFS="$_US" read -r pid epoch project project_dir model_r status_r \
+            used_pct tokens_in tokens_out branch activity mem_kb session_title <<EOF
+$_row
+EOF
+        [ "$pid" -gt 0 ] 2>/dev/null || continue
 
         # Remove stale sessions for dead processes
         if ! kill -0 "$pid" 2>/dev/null; then
             rm -f "$f" "$SESSIONS_DIR/${pid}.status"
             continue
         fi
-
-        epoch=$(jq -r       '.epoch          // 0'  "$f" 2>/dev/null)
-        project=$(jq -r    '.project_name   // "unknown"' "$f" 2>/dev/null)
-        project_dir=$(jq -r '.project_dir   // ""'  "$f" 2>/dev/null)
-        model_r=$(jq -r    '.model          // "Unknown"' "$f" 2>/dev/null)
-        status_r=$(jq -r   '.status         // ""'  "$f" 2>/dev/null)
-        used_pct=$(jq -r   '.used_pct       // 0'   "$f" 2>/dev/null)
-        tokens_in=$(jq -r  '.tokens_in      // 0'   "$f" 2>/dev/null)
-        tokens_out=$(jq -r '.tokens_out     // 0'   "$f" 2>/dev/null)
-        branch=$(jq -r     '.git_branch     // ""'  "$f" 2>/dev/null)
-        activity=$(jq -r   '.last_activity  // ""'  "$f" 2>/dev/null)
-        mem_kb=$(jq -r     '.mem_kb         // 0'   "$f" 2>/dev/null)
-        session_title=$(jq -r '.session_title // ""' "$f" 2>/dev/null)
 
         # Shorten model name: "Claude Opus 4.6" → "Opus 4.6"
         model=$(printf '%s' "$model_r" | sed 's/^Claude //')
@@ -222,6 +226,8 @@ render() {
     printf '\n%bStatus:%b  %bWORKING%b  %bDONE%b  %bIDLE%b  %bWAITING%b  %bQUEUED%b' \
         "$BOLD" "$R" "$C_WORKING" "$R" "$C_DONE" "$R" "$C_IDLE" "$R" "$C_WAITING" "$R" "$C_QUEUED" "$R"
     printf '   %b» text  → tool  « user%b\n' "$DIM" "$R"
+    ) # end _frame
+    printf '\033[2J\033[H%s' "$_frame"
 }
 
 # ── Entry point ───────────────────────────────────────────────────────────────

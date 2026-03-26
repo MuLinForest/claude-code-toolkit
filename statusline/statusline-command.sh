@@ -11,14 +11,20 @@ if [ "${1:-}" = "--version" ]; then echo "$VERSION"; exit 0; fi
 input=$(cat)
 
 # ── Resolve Claude process PID ──────────────────────────────────────────────
-_claude_pid="$PPID"
-_parent=$(ps -o ppid= -p "$_claude_pid" 2>/dev/null | tr -d ' ')
-if [ -n "$_parent" ]; then
-    _pcomm=$(ps -o comm= -p "$_parent" 2>/dev/null | tr -d ' ')
+# Walk up to 6 levels: claude → sh(multi) → sh(pipeline) → sh(statusline-command.sh)
+_claude_pid=""
+_found_claude=0
+_check="$PPID"
+for _i in 1 2 3 4 5 6; do
+    _pcomm=$(ps -o comm= -p "$_check" 2>/dev/null | tr -d ' ')
     if [ "$_pcomm" = "claude" ]; then
-        _claude_pid="$_parent"
+        _claude_pid="$_check"
+        _found_claude=1
+        break
     fi
-fi
+    _check=$(ps -o ppid= -p "$_check" 2>/dev/null | tr -d ' ')
+    [ -z "$_check" ] || [ "$_check" = "0" ] || [ "$_check" = "1" ] && break
+done
 
 # ── Theme Selection ──────────────────────────────────────────────────────────
 if [ -n "${NO_COLOR:-}" ]; then
@@ -128,6 +134,35 @@ else
     _widgets_l2=""
 fi
 
+# ── Load icon overrides ──────────────────────────────────────────────────────
+_icon_conf="${CLAUDE_STATUSLINE_ICONS_CONF:-$HOME/.claude/statusline-icons.conf}"
+# Defaults
+_ic_model="" _ic_ctx="" _ic_tokens="" _ic_cost="" _ic_duration=""
+_ic_lines="" _ic_alert="⚠" _ic_git="" _ic_project="" _ic_version=""
+_ic_rate_filled="●" _ic_rate_empty="○"
+if [ "$_theme" = "none" ]; then
+    _ic_alert="!" _ic_git="" _ic_rate_filled="*" _ic_rate_empty="."
+fi
+if [ -f "$_icon_conf" ]; then
+    while IFS='=' read -r _ik _iv || [ -n "$_ik" ]; do
+        case "$_ik" in \#*|"") continue ;; esac
+        case "$_ik" in
+            model)       _ic_model="$_iv" ;;
+            ctx)         _ic_ctx="$_iv" ;;
+            tokens)      _ic_tokens="$_iv" ;;
+            cost)        _ic_cost="$_iv" ;;
+            duration)    _ic_duration="$_iv" ;;
+            lines)       _ic_lines="$_iv" ;;
+            alert)       _ic_alert="$_iv" ;;
+            git)         _ic_git="$_iv" ;;
+            project)     _ic_project="$_iv" ;;
+            version)     _ic_version="$_iv" ;;
+            rate_filled) _ic_rate_filled="$_iv" ;;
+            rate_empty)  _ic_rate_empty="$_iv" ;;
+        esac
+    done < "$_icon_conf"
+fi
+
 # ── Parse JSON input (single jq call) ───────────────────────────────────────
 _now=$(date +%s)
 
@@ -164,6 +199,17 @@ $_parsed
 EOF
 
 tokens_used=$(( total_input + total_output ))
+
+# ── Session title (from customTitle via session_id) ───────────────────────────
+_session_id=$(printf '%s' "$input" | jq -r '.session_id // ""' 2>/dev/null) || _session_id=""
+_session_title=""
+if [ -n "$_session_id" ] && [ -n "$project_dir" ]; then
+    _proj_key=$(printf '%s' "$project_dir" | tr '/' '-')
+    _jsonl="$HOME/.claude/projects/${_proj_key}/${_session_id}.jsonl"
+    if [ -f "$_jsonl" ]; then
+        _session_title=$(grep '"customTitle"' "$_jsonl" 2>/dev/null | tail -1 | jq -r '.customTitle // ""' 2>/dev/null) || _session_title=""
+    fi
+fi
 
 # ── Git branch with 5-second cache ──────────────────────────────────────────
 _git_cache="/tmp/claude-sl-git-$(id -u)"
@@ -286,7 +332,7 @@ if [ -n "$cc_version" ] && [ "$cc_version" != "null" ]; then
 fi
 
 # ── Rate limit helpers ──────────────────────────────────────────────────────
-# Build a 5-dot bar: filled=● empty=○ (none theme: */.)
+# Build a 5-dot bar using customizable filled/empty icons
 build_dots() {
     _bd_pct="$1"
     _bd_filled=$(( _bd_pct / 20 ))
@@ -296,12 +342,12 @@ build_dots() {
     _bd_out=""
     _bd_i=0
     while [ "$_bd_i" -lt "$_bd_filled" ]; do
-        if [ "$_theme" = "none" ]; then _bd_out="${_bd_out}*"; else _bd_out="${_bd_out}●"; fi
+        _bd_out="${_bd_out}${_ic_rate_filled}"
         _bd_i=$(( _bd_i + 1 ))
     done
     _bd_i=0
     while [ "$_bd_i" -lt "$_bd_empty" ]; do
-        if [ "$_theme" = "none" ]; then _bd_out="${_bd_out}."; else _bd_out="${_bd_out}○"; fi
+        _bd_out="${_bd_out}${_ic_rate_empty}"
         _bd_i=$(( _bd_i + 1 ))
     done
     printf '%s' "$_bd_out"
@@ -326,12 +372,20 @@ fmt_remaining() {
 
 # Render a single rate sub-widget: label + dots + pct + time
 # Returns 1 if data is absent (-1).
+# Shows dim color + "~" suffix when resets_at has passed (stale data).
 _render_rate() {
     _rr_label="$1"; _rr_pct_raw="$2"; _rr_remain="$3"
     case "$_rr_pct_raw" in ''|-1) return 1 ;; esac
     _rr_pct=$(LC_ALL=C printf "%.0f" "$_rr_pct_raw")
     [ "$_rr_pct" -gt 100 ] && _rr_pct=100
-    if [ "$_rr_pct" -ge 100 ]; then
+    # Check if rate window has reset (remaining <= 0 means resets_at is in the past)
+    _rr_stale=0
+    case "$_rr_remain" in ''|-1) ;; *)
+        [ "$_rr_remain" -le 0 ] 2>/dev/null && _rr_stale=1
+    ;; esac
+    if [ "$_rr_stale" -eq 1 ]; then
+        _rr_c="$C_SEP"; _rr_suffix="~"
+    elif [ "$_rr_pct" -ge 100 ]; then
         _rr_c="$C_ALERT"; _rr_suffix="!"
     elif [ "$_rr_pct" -gt 80 ]; then
         _rr_c="$C_CTX_BAD"; _rr_suffix=""
@@ -351,17 +405,17 @@ _render_rate() {
 # ── Render widget ────────────────────────────────────────────────────────────
 render_widget() {
     case "$1" in
-        model)    printf '%b' "${C_MODEL}${model}${C_RESET}" ;;
+        model)    printf '%b%s%b' "${C_MODEL}" "${_ic_model:+${_ic_model} }${model}" "${C_RESET}" ;;
         bar)      printf '%b' "[${C_BAR_FILL}${filled_bar}${C_BAR_EMPTY}${empty_bar}${C_RESET}]" ;;
-        ctx)      printf '%b' "${C_CTX}${pct_str}${C_RESET}" ;;
-        tokens)   printf '%b' "${C_TOKENS}${tokens_str} tokens${C_RESET}" ;;
-        cost)     [ -n "$cost_str" ] && printf '%b' "${C_COST}${cost_str}${C_RESET}" || return 1 ;;
-        duration) [ -n "$duration_str" ] && printf '%b' "${C_COST}${duration_str}${C_RESET}" || return 1 ;;
-        lines)    [ -n "$lines_str" ] && printf '%b' "${C_TOKENS}${lines_str}${C_RESET}" || return 1 ;;
-        alert)    [ "$exceeds_200k" = "true" ] && printf '%b' "${C_ALERT}⚠ 200k${C_RESET}" || return 1 ;;
-        git)      [ -n "$git_branch" ] && printf '%b' "${C_BRANCH} ${git_branch}${C_RESET}" || return 1 ;;
-        project)  printf '%b' "${C_PROJECT}${project_name}${C_RESET}" ;;
-        version)  [ -n "$version_str" ] && printf '%b' "${C_SEP}${version_str}${C_RESET}" || return 1 ;;
+        ctx)      printf '%b%s%b' "${C_CTX}" "${_ic_ctx:+${_ic_ctx} }${pct_str}" "${C_RESET}" ;;
+        tokens)   printf '%b%s%b' "${C_TOKENS}" "${_ic_tokens:+${_ic_tokens} }${tokens_str} tokens" "${C_RESET}" ;;
+        cost)     [ -n "$cost_str" ] && printf '%b%s%b' "${C_COST}" "${_ic_cost:+${_ic_cost} }${cost_str}" "${C_RESET}" || return 1 ;;
+        duration) [ -n "$duration_str" ] && printf '%b%s%b' "${C_COST}" "${_ic_duration:+${_ic_duration} }${duration_str}" "${C_RESET}" || return 1 ;;
+        lines)    [ -n "$lines_str" ] && printf '%b%s%b' "${C_TOKENS}" "${_ic_lines:+${_ic_lines} }${lines_str}" "${C_RESET}" || return 1 ;;
+        alert)    [ "$exceeds_200k" = "true" ] && printf '%b%s%b' "${C_ALERT}" "${_ic_alert:+${_ic_alert} }200k" "${C_RESET}" || return 1 ;;
+        git)      [ -n "$git_branch" ] && printf '%b%s%b' "${C_BRANCH}" "${_ic_git:+${_ic_git} }${git_branch}" "${C_RESET}" || return 1 ;;
+        project)  printf '%b%s%b' "${C_PROJECT}" "${_ic_project:+${_ic_project} }${project_name}" "${C_RESET}" ;;
+        version)  [ -n "$version_str" ] && printf '%b%s%b' "${C_SEP}" "${_ic_version:+${_ic_version} }${version_str}" "${C_RESET}" || return 1 ;;
         vim)
             case "$vim_mode" in
                 INSERT*) printf '%b' "${C_ALERT}[INSERT]${C_RESET}" ;;
@@ -428,7 +482,7 @@ fi
 
 # ── Write session state for tmux/dashboard ────────────────────────────────────
 SESSIONS_DIR="$HOME/.claude/sessions"
-if [ -d "$SESSIONS_DIR" ]; then
+if [ "$_found_claude" -eq 1 ] && [ -d "$SESSIONS_DIR" ]; then
     _epoch="$_now"
     _activity=$(printf '%s' "$input" | jq -r '.last_message // .session.last_message // ""' 2>/dev/null) || _activity=""
     _mem=$(ps -o rss= -p "$_claude_pid" 2>/dev/null | awk '{printf "%d",$1+0}') || _mem=0
@@ -463,11 +517,12 @@ if [ -d "$SESSIONS_DIR" ]; then
         --arg tout   "${total_output:-0}" \
         --arg mem    "${_mem:-0}" \
         --arg cost   "${cost_usd:-0}" \
+        --arg stitle "${_session_title:-}" \
         '{pid:($pid|tonumber),epoch:($epoch|tonumber),model:$model,
           project_dir:$pdir,project_name:$pname,git_branch:$branch,
           status:$status,last_activity:$act,
           used_pct:($pct|tonumber),tokens_in:($tin|tonumber),
           tokens_out:($tout|tonumber),mem_kb:($mem|tonumber),
-          cost_usd:($cost|tonumber)}' \
+          cost_usd:($cost|tonumber),session_title:$stitle}' \
         > "$_sf" 2>/dev/null || true
 fi
