@@ -136,7 +136,11 @@ render() {
                     [ "$_diff" -lt "$_best_diff" ] && { _best="$_jf"; _best_diff="$_diff"; }
                 done
                 if [ -n "$_best" ]; then
-                    slug=$(tail -1 "$_best" 2>/dev/null | jq -r '.slug // ""' 2>/dev/null) || slug=""
+                    # Prefer customTitle (/rename) over auto-generated slug
+                    slug=$(grep '"type":"custom-title"' "$_best" 2>/dev/null | tail -1 | \
+                        jq -r '.customTitle // ""' 2>/dev/null) || slug=""
+                    [ -z "$slug" ] && \
+                        slug=$(tail -1 "$_best" 2>/dev/null | jq -r '.slug // ""' 2>/dev/null) || true
                 fi
             fi
         fi
