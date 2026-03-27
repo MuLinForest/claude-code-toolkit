@@ -86,26 +86,13 @@ render() {
     fi
     printf '\n\n'
 
-    # Adaptive MODEL column width — one jq across all session files
-    _model_w=10
-    if ls "$SESSIONS_DIR"/*.json > /dev/null 2>&1; then
-        _model_w=$(jq -rs '[.[] | .model // "" | gsub("^Claude "; "") | length] | max // 10' "$SESSIONS_DIR"/*.json 2>/dev/null)
-        [ "$_model_w" -lt 10 ] && _model_w=10
-    fi
-    _model_dashes=$(printf '%*s' "$_model_w" '' | tr ' ' '-')
-
-    # Column headers
-    printf '%b%-8s %-22s %-14s %-*s %-8s %-24s %-6s %-7s %s%b\n' \
-        "$C_HEAD" \
-        'PID' 'NAME' 'PROJECT' "$_model_w" 'MODEL' 'STATUS' 'CONTEXT' 'CTX%' 'OUTPUT' 'BRANCH' \
-        "$R"
-    printf '%b%s%b\n' "$C_SEP" \
-        "-------- ---------------------- -------------- ${_model_dashes} -------- ------------------------ ------ ------- ----------" \
-        "$R"
-
     count=0; total_in=0; total_out=0; total_mem=0
     _US=$(printf '\037')   # ASCII Unit Separator — POSIX-safe, non-whitespace
+    # Minimum column widths (header label length floors)
+    _name_col=4; _proj_col=7; _model_col=5
+    _tmpfile=$(mktemp)
 
+    # ── Pass 1: parse sessions, write to temp file, track max column widths ───
     for f in "$SESSIONS_DIR"/*.json; do
         [ -f "$f" ] || continue
 
@@ -118,8 +105,7 @@ render() {
             .model//"Unknown", .status//"",
             (.used_pct//0|tostring), (.tokens_in//0|tostring), (.tokens_out//0|tostring),
             .git_branch//"", .last_activity//"",
-            (.mem_kb//0|tostring),
-            .session_title//""
+            (.mem_kb//0|tostring), .session_title//""
         ] | join("\u001f")' "$f" 2>/dev/null) || continue
         IFS="$_US" read -r pid epoch project project_dir model_r status_r \
             used_pct tokens_in tokens_out branch activity mem_kb session_title <<EOF
@@ -161,9 +147,18 @@ EOF
             fi
         fi
 
+        # Track max display widths (CJK-aware for slug)
+        _sb=$(printf '%s' "$slug"    | wc -c); _sc=$(printf '%s' "$slug"    | wc -m)
+        _slen=$(( _sc + (_sb - _sc) / 2 ))
+        [ "$_slen"  -gt "$_name_col"  ] && _name_col="$_slen"
+        _plen=$(printf '%s' "$project" | wc -m)
+        [ "$_plen"  -gt "$_proj_col"  ] && _proj_col="$_plen"
+        _mlen=$(printf '%s' "$model"   | wc -m)
+        [ "$_mlen"  -gt "$_model_col" ] && _model_col="$_mlen"
+
         # Determine display status: prefer event-driven .status file
         disp_status="" _status_epoch=""
-        [ -f "$SESSIONS_DIR/${pid}.status" ] && read -r disp_status _status_epoch < "$SESSIONS_DIR/${pid}.status"
+        read -r disp_status _status_epoch < "$SESSIONS_DIR/${pid}.status" 2>/dev/null || disp_status=""
         # Fallback: JSON field, then file age
         if [ -z "$disp_status" ]; then
             age=$(( now - epoch ))
@@ -176,6 +171,48 @@ EOF
             fi
         fi
 
+        # Store parsed row in temp file for pass 2
+        printf '%s\n' "${pid}${_US}${slug}${_US}${project}${_US}${model}${_US}${disp_status}${_US}${used_pct}${_US}${tokens_in}${_US}${tokens_out}${_US}${branch}${_US}${activity}${_US}${mem_kb}" >> "$_tmpfile"
+
+        count=$((count + 1))
+        total_in=$((total_in + tokens_in))
+        total_out=$((total_out + tokens_out))
+        total_mem=$((total_mem + mem_kb))
+    done
+
+    # ── Fit columns within terminal width ─────────────────────────────────────
+    # Fixed overhead: PID(8)+sp + STATUS(8)+sp + BAR(24)+sp + CTX%(6)+sp + OUT(7)+sp
+    #                 + 3 spaces separating the 3 adaptive cols = 61 total
+    _term_w="${COLUMNS:-120}"
+    _over=$(( _name_col + _proj_col + _model_col - (_term_w - 61) ))
+    if [ "$_over" -gt 0 ]; then
+        # Shrink NAME first, then PROJECT, then MODEL — each down to its minimum
+        _shrink=$(( _name_col  - 4 )); [ "$_shrink" -gt "$_over" ] && _shrink="$_over"
+        _name_col=$(( _name_col - _shrink )); _over=$(( _over - _shrink ))
+        _shrink=$(( _proj_col  - 7 )); [ "$_shrink" -gt "$_over" ] && _shrink="$_over"
+        _proj_col=$(( _proj_col - _shrink )); _over=$(( _over - _shrink ))
+        _shrink=$(( _model_col - 5 )); [ "$_shrink" -gt "$_over" ] && _shrink="$_over"
+        _model_col=$(( _model_col - _shrink ))
+    fi
+
+    # ── Column headers (all three adaptive) ───────────────────────────────────
+    _name_sep=$(printf  '%*s' "$_name_col"  '' | tr ' ' '-')
+    _proj_sep=$(printf  '%*s' "$_proj_col"  '' | tr ' ' '-')
+    _model_sep=$(printf '%*s' "$_model_col" '' | tr ' ' '-')
+    printf '%b%-8s %-*s %-*s %-*s %-8s %-24s %-6s %-7s %s%b\n' \
+        "$C_HEAD" \
+        'PID' "$_name_col" 'NAME' "$_proj_col" 'PROJECT' "$_model_col" 'MODEL' \
+        'STATUS' 'CONTEXT' 'CTX%' 'OUTPUT' 'BRANCH' "$R"
+    printf '%b%s%b\n' "$C_SEP" \
+        "-------- ${_name_sep} ${_proj_sep} ${_model_sep} -------- ------------------------ ------ ------- ----------" \
+        "$R"
+
+    # ── Pass 2: render rows from temp file ────────────────────────────────────
+    while IFS= read -r _stored; do
+        IFS="$_US" read -r pid slug project model disp_status \
+            used_pct tokens_in tokens_out branch activity mem_kb <<EOF
+$_stored
+EOF
         case "$(printf '%s' "$disp_status" | tr '[:upper:]' '[:lower:]')" in
             working|thinking|responding|streaming) sc="$C_WORKING"; sl="WORKING" ;;
             done)                                  sc="$C_DONE";    sl="DONE"    ;;
@@ -188,11 +225,10 @@ EOF
         bar=$(make_bar "$used_pct" 22)
         out_str=$(fmt_k "$tokens_out")
 
-        # Row
-        printf '%b%-8s%b ' "$C_PID"    "$pid"    "$R"
-        printf '%b' "$C_NAME"; pad_wide "$slug" 22; printf '%b ' "$R"
-        printf '%b%-14s%b ' "$C_PROJ"  "$project" "$R"
-        printf '%b%-*s%b ' "$C_MODEL" "$_model_w" "$model" "$R"
+        printf '%b%-8s%b '  "$C_PID"   "$pid"    "$R"
+        printf '%b' "$C_NAME"; pad_wide "$slug" "$_name_col"; printf '%b ' "$R"
+        printf '%b%-*s%b '  "$C_PROJ"  "$_proj_col"  "$project" "$R"
+        printf '%b%-*s%b '  "$C_MODEL" "$_model_col" "$model"   "$R"
         printf '%b%-8s%b '  "$sc"      "$sl"      "$R"
         printf '%s '        "$bar"
         printf '%b%-6s%b '  "$C_PCT"   "${used_pct}%" "$R"
@@ -204,12 +240,8 @@ EOF
             short=$(printf '%s' "$activity" | cut -c1-110)
             printf '%b  » %s%b\n' "$C_ACT" "$short" "$R"
         fi
-
-        count=$((count + 1))
-        total_in=$((total_in + tokens_in))
-        total_out=$((total_out + tokens_out))
-        total_mem=$((total_mem + mem_kb))
-    done
+    done < "$_tmpfile"
+    rm -f "$_tmpfile"
 
     if [ "$count" -eq 0 ]; then
         printf '\n%s  No active Claude Code sessions found.%s\n' "$DIM" "$R"
